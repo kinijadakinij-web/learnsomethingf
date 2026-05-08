@@ -111,6 +111,32 @@ Return JSON:
             strategy["created_at"] = time.time()
             strategy["status"] = "specified"
             strategy["research_id"] = research.get("research_id", "")
+            strategy["strategy_name"] = strategy_name
+
+            # ── Normalize field names — Qwen kadang pakai key yang beda ──────
+            # symbol
+            strategy["symbol"] = (
+                strategy.get("symbol") or strategy.get("pair") or
+                strategy.get("ticker") or strategy.get("asset") or "BTCUSDT"
+            )
+            # timeframe
+            strategy["timeframe"] = (
+                strategy.get("timeframe") or strategy.get("interval") or
+                strategy.get("tf") or strategy.get("time_frame") or "1h"
+            )
+            # leverage
+            strategy["leverage"] = int(
+                strategy.get("leverage") or strategy.get("lev") or 10
+            )
+            # stop_loss / take_profit
+            strategy["stop_loss_pct"] = float(
+                strategy.get("stop_loss_pct") or strategy.get("stop_loss") or
+                strategy.get("sl_pct") or 0.02
+            )
+            strategy["take_profit_pct"] = float(
+                strategy.get("take_profit_pct") or strategy.get("take_profit") or
+                strategy.get("tp_pct") or 0.04
+            )
 
             store = get_store()
             await store.save_strategy(strategy)
@@ -125,13 +151,19 @@ Return JSON:
             await self.notify_telegram(
                 f"✅ **Strategy Specified**\n"
                 f"🎯 `{strategy_name}`\n"
-                f"📈 Symbol: `{strategy.get('symbol')}` | TF: `{strategy.get('timeframe')}`\n"
-                f"⚡ Leverage: `{strategy.get('leverage')}x`",
+                f"📈 Symbol: `{strategy['symbol']}` | TF: `{strategy['timeframe']}`\n"
+                f"⚡ Leverage: `{strategy['leverage']}x`",
                 level="success"
             )
 
+            # ── FIX: emit CODE_REQUESTED agar CodingAgent langsung pickup ────
+            # (sebelumnya hanya emit STRATEGY_CREATED yang tidak didengar CodingAgent)
             await self.emit(
                 EventType.STRATEGY_CREATED,
+                payload={"strategy": strategy, "strategy_id": strategy_id}
+            )
+            await self.emit(
+                EventType.CODE_REQUESTED,
                 payload={"strategy": strategy, "strategy_id": strategy_id}
             )
 
