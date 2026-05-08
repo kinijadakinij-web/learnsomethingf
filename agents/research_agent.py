@@ -164,6 +164,17 @@ Return as JSON with keys:
 """
         try:
             research = await self.think_json(prompt, system_prompt=SYSTEM_PROMPT)
+
+            # Fallback: kalau strategy_name kosong, generate dari topic
+            if not research.get("strategy_name"):
+                # Coba key alternatif yang mungkin dipakai Qwen
+                research["strategy_name"] = (
+                    research.get("name")
+                    or research.get("title")
+                    or research.get("strategy")
+                    or " ".join(w.capitalize() for w in topic.split()[:5])
+                )
+
             research["topic"] = topic
             research["researched_by"] = self.agent_id
             research["timestamp"] = time.time()
