@@ -1,0 +1,27 @@
+# Core
+motor==3.3.2
+pymongo==4.6.1
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# HTTP / Async
+requests==2.31.0
+aiohttp==3.9.3
+httpx==0.27.0
+
+# Telegram
+python-telegram-bot==20.7
+
+# Data / Quant
+pandas==2.1.4
+numpy==1.26.2
+pandas-ta==0.3.14b0
+
+# Logging / Display
+colorlog==6.8.0
+rich==13.7.0
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2024.1
+pydantic==2.5.3
