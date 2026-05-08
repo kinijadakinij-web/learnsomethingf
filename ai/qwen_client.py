@@ -249,29 +249,11 @@ class QwenClient:
         system_prompt: Optional[str] = None,
         history: Optional[list] = None,
     ) -> dict:
-        """
-        Ask Qwen and parse the response as JSON.
-        Forces the model to respond in JSON format.
-        """
+        """Ask Qwen and return parsed JSON — robust extraction."""
+        from ai.bearer_pool import _extract_json
         json_system = (system_prompt or "") + (
             "\n\nIMPORTANT: Respond ONLY with valid JSON. "
             "No markdown, no explanation, no backticks. Pure JSON only."
         )
         raw = await self.ask(prompt, system_prompt=json_system, history=history)
-
-        # Strip markdown fences if present
-        raw = raw.strip()
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.warning(f"[Qwen] JSON parse error: {e}. Raw: {raw[:200]}")
-            # Try to extract JSON from the response
-            import re
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            raise
+        return _extract_json(raw)
