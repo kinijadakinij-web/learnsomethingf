@@ -21,9 +21,12 @@ def _extract_json(raw: str) -> dict:
     - Markdown fences (```json ... ```)
     - Extra text before/after JSON
     - Multiple JSON objects (takes first complete one)
-    - Python dict syntax with single quotes  ← NEW
-    - Trailing commas                        ← NEW
-    - None/True/False Python literals        ← NEW
+    - Python dict syntax with single quotes
+    - Trailing commas
+    - None/True/False Python literals
+    - Template/placeholder echo-back detection  <- NEW
+    - Graceful ast round-trip (no TypeError)    <- FIXED
+    - json_repair fallback (optional dep)       <- NEW
     """
     import json
     import re
@@ -31,13 +34,30 @@ def _extract_json(raw: str) -> dict:
 
     raw = raw.strip()
 
-    # Strip markdown code fences
-    if raw.startswith("```"):
+    # ── Strip markdown code fences ────────────────────────────────────────
+    fence_match = re.match(r'^```(?:json)?\s*\n(.*?)\n?```\s*$', raw, re.DOTALL)
+    if fence_match:
+        raw = fence_match.group(1).strip()
+    elif raw.startswith("```"):
         lines = raw.split("\n")
         inner = lines[1:]
-        if inner and inner[-1].strip() == "```":
+        if inner and inner[-1].strip().startswith("```"):
             inner = inner[:-1]
         raw = "\n".join(inner).strip()
+
+    # ── Detect template echo-back ─────────────────────────────────────────
+    # Qwen sometimes returns the schema example verbatim, with "..." or {...}
+    # as placeholder values that cannot be valid data.
+    _PLACEHOLDER = re.compile(
+        r':\s*"\.\.\."'          # : "..."
+        r'|:\s*\{\s*\.\.\.\s*\}'  # : {...}
+        r'|:\s*\[\s*\.\.\.\s*\]'  # : [...]
+    )
+    if _PLACEHOLDER.search(raw):
+        raise ValueError(
+            "Response is an unfilled template (contains '...', '{...}' placeholders). "
+            "The model echoed the schema instead of populating it."
+        )
 
     # ── Attempt 1: direct JSON parse (happy path) ─────────────────────────
     try:
@@ -45,16 +65,15 @@ def _extract_json(raw: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # ── Find the outermost { ... } block ─────────────────────────────────
+    # ── Extract the outermost { ... } block ──────────────────────────────
     start = raw.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in response: {raw[:200]}")
 
-    # Track brace depth to find the matching closing brace
     depth = 0
     in_str = False
     esc = False
-    candidate = raw  # fallback
+    candidate = raw
     for i, ch in enumerate(raw[start:], start):
         if esc:
             esc = False
@@ -75,6 +94,13 @@ def _extract_json(raw: str) -> dict:
                 candidate = raw[start:i + 1]
                 break
 
+    # Check extracted block for placeholders too
+    if _PLACEHOLDER.search(candidate):
+        raise ValueError(
+            "Extracted JSON block contains unfilled template placeholders. "
+            f"Block: {candidate[:200]}"
+        )
+
     # ── Attempt 2: JSON parse the extracted block ─────────────────────────
     try:
         return json.loads(candidate)
@@ -82,28 +108,36 @@ def _extract_json(raw: str) -> dict:
         pass
 
     # ── Attempt 3: fix Python dict → JSON ────────────────────────────────
-    # Qwen sometimes returns Python dict syntax: {'key': 'value', 'n': None}
-    # ast.literal_eval handles single quotes, None, True, False
+    # ast.literal_eval handles single quotes, None, True, False.
+    # IMPORTANT: use default=str in json.dumps to survive non-serialisable
+    # types like sets or Ellipsis that ast may produce from malformed input.
     try:
         py_obj = ast.literal_eval(candidate)
         if isinstance(py_obj, dict):
-            # Round-trip through json to normalize types
-            return json.loads(json.dumps(py_obj))
+            return json.loads(json.dumps(py_obj, default=str))
     except Exception:
         pass
 
     # ── Attempt 4: aggressive cleanup then re-parse ───────────────────────
     try:
         fixed = candidate
-        # single quotes → double quotes (careful not to break already-double-quoted)
         fixed = re.sub(r"(?<![\\])'", '"', fixed)
-        # Python None/True/False → JSON null/true/false
         fixed = re.sub(r'\bNone\b', 'null', fixed)
         fixed = re.sub(r'\bTrue\b', 'true', fixed)
         fixed = re.sub(r'\bFalse\b', 'false', fixed)
-        # trailing commas before } or ]
         fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
         return json.loads(fixed)
+    except Exception:
+        pass
+
+    # ── Attempt 5: json_repair (optional third-party lib) ─────────────────
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(candidate, return_objects=True)
+        if isinstance(repaired, dict) and repaired:
+            return repaired
+    except ImportError:
+        pass
     except Exception:
         pass
 
@@ -111,7 +145,6 @@ def _extract_json(raw: str) -> dict:
         f"Could not parse JSON from response after all attempts.\n"
         f"Candidate block: {candidate[:400]}"
     )
-
 
 class BearerPool:
     """
@@ -232,14 +265,45 @@ class BearerPool:
         prompt: str,
         system_prompt: Optional[str] = None,
         history: Optional[list] = None,
+        json_retries: int = 3,
     ) -> dict:
-        """Ask Qwen and return parsed JSON — robust against extra text/multiple objects."""
+        """Ask Qwen and return parsed JSON.
+
+        Retries the *AI call* with corrective feedback when parsing fails,
+        so transient template echo-backs and malformed outputs are healed
+        without crashing the caller.
+        """
         json_system = (system_prompt or "") + (
-            "\n\nIMPORTANT: Respond ONLY with valid JSON. "
-            "No markdown, no explanation, no backticks. Pure JSON only."
+            "\n\nCRITICAL: Your response must be ONLY a valid JSON object. "
+            "Do NOT include any explanation, markdown fences, backticks, or "
+            "placeholder values like \'...\' or \'{...}\'. "
+            "Fill in every field with real values. Pure JSON only."
         )
-        raw = await self.ask(prompt, system_prompt=json_system, history=history)
-        return _extract_json(raw)
+        last_err: Exception = RuntimeError("No attempts made")
+        for attempt in range(json_retries):
+            if attempt == 0:
+                current_prompt = prompt
+            else:
+                # Feed the bad response back so the model can self-correct
+                current_prompt = (
+                    f"{prompt}\n\n"
+                    f"[RETRY {attempt}/{json_retries-1}] Your previous response could not be "
+                    f"parsed as JSON. Error: {last_err}\n"
+                    "Please respond with ONLY a valid JSON object, no placeholders."
+                )
+            raw = await self.ask(current_prompt, system_prompt=json_system, history=history)
+            try:
+                return _extract_json(raw)
+            except ValueError as e:
+                last_err = e
+                logger.warning(
+                    f"[BearerPool.ask_json] Parse failed (attempt {attempt+1}/{json_retries}): {e}"
+                )
+                if attempt < json_retries - 1:
+                    await asyncio.sleep(1)
+        raise ValueError(
+            f"ask_json failed after {json_retries} attempts. Last error: {last_err}"
+        )
 
     @property
     def status(self) -> dict:
