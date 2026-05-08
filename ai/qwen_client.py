@@ -148,6 +148,7 @@ class QwenClient:
         })
 
         full_reply = ""
+        think_buf  = ""   # Thinking phase — dikumpulkan tapi TIDAK masuk ke reply
 
         with self.session.post(
             url, json=payload, headers=headers, stream=True, timeout=180
@@ -166,15 +167,33 @@ class QwenClient:
                     data = json.loads(data_str)
                     if not data.get("choices"):
                         continue
-                    delta = data["choices"][0].get("delta", {})
+                    delta   = data["choices"][0].get("delta", {})
+                    phase   = delta.get("phase", "answer")
                     content = delta.get("content", "")
-                    status = delta.get("status")
-                    if content:
-                        full_reply += content
-                    if status == "finished":
-                        break
+                    status  = delta.get("status", "")
+
+                    if phase == "thinking_summary":
+                        # isi thinking Qwen — kumpulkan terpisah, JANGAN masuk reply
+                        # dan JANGAN break di sini meskipun status finished
+                        if content:
+                            think_buf += content
+                    else:
+                        # Phase "answer" — ini yang kita mau
+                        if content:
+                            full_reply += content
+                        # break HANYA saat answer finished, bukan thinking finished
+                        if status == "finished":
+                            break
+
                 except (json.JSONDecodeError, KeyError):
                     pass
+
+        if think_buf:
+            logger.debug(f"[Qwen thinking] {think_buf[:200]}")
+        # Edge case: Qwen hanya kirim thinking tanpa answer — fallback
+        if not full_reply.strip() and think_buf:
+            logger.warning("[Qwen] Answer kosong, fallback ke thinking content")
+            full_reply = think_buf
 
         return full_reply
 
