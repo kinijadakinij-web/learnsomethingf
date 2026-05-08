@@ -14,11 +14,10 @@ httpx==0.25.2
 python-telegram-bot==20.7
 
 # Data / Quant
-# pandas 2.2.x supports numpy 2.x
-# pandas-ta 0.4.67b0 requires numpy>=2.2.6
+# pandas-ta TIDAK di-pin di sini — di-install otomatis oleh PackageManager
+# saat dibutuhkan oleh generated strategy scripts
 pandas==2.2.3
 numpy==2.2.6
-pandas-ta==0.4.67b0
 
 # Logging / Display
 colorlog==6.8.0
