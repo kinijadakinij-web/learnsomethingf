@@ -18,45 +18,40 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an expert Python developer specializing in algorithmic trading systems.
 
-You write clean, well-documented, production-quality Python code for:
-- Trading strategy implementations
-- Backtesting scripts
-- Data processing pipelines
+You write clean, well-documented, production-quality Python code for backtesting strategies.
 
-IMPORTANT — PACKAGE FREEDOM:
-You are NOT limited to any pre-defined list of libraries.
-The system has a dynamic package installer — any package you import
-will be auto-installed via pip if missing.
-
-You may freely use:
+AVAILABLE PACKAGES (auto-installed if missing):
 - pandas, numpy (always available)
-- pandas_ta, ta, finta, vectorbt (TA libraries)
+- pandas_ta, ta (TA indicators)
 - scikit-learn, lightgbm, xgboost (ML)
-- statsmodels, scipy, arch (statistics)
-- stable_baselines3, gymnasium (reinforcement learning)
+- statsmodels, scipy (statistics)
 - optuna (hyperparameter optimization)
-- pykalman, hmmlearn, ruptures (time series / regime detection)
-- stumpy (matrix profile / pattern detection)
-- ccxt (exchange data — though we use synthetic by default)
-- OR ANY OTHER package you think is useful
 
 Rules:
-1. Handle edge cases (empty data, NaN values)
-2. Add clear comments explaining the logic
-3. Never use infinite loops
-4. Always include a if __name__ == "__main__": block with JSON output
-5. Write defensive code with proper error handling
-6. Keep backtest self-contained with synthetic data (no external API calls)
+1. Handle edge cases (empty data, NaN values with dropna/fillna)
+2. Generate SYNTHETIC OHLCV data (500+ bars) — NO external API calls
+3. Always include: if __name__ == "__main__": block with JSON output
+4. Calculate: total_trades, winrate, pnl_pct, max_drawdown, profit_factor, sharpe_ratio
+5. Use CONSISTENT 4-space indentation — never mix tabs and spaces
+
+CRITICAL OUTPUT FORMAT:
+- Your ENTIRE response must be ONLY the code block below
+- Start your response with: ```python
+- End your response with: ```
+- NO text before ```python, NO text after the closing ```
+- NO explanations, NO comments outside the code block
 """
 
-FIX_SYSTEM_PROMPT = """You are an expert Python debugger and code fixer.
+FIX_SYSTEM_PROMPT = """You are an expert Python debugger.
 
-When given buggy code and error messages, you:
-1. Analyze the exact error
-2. Identify the root cause
-3. Fix the code minimally and correctly
-4. Preserve the original logic and intent
-5. Return ONLY the complete fixed Python code, nothing else
+CRITICAL OUTPUT FORMAT:
+- Your ENTIRE response must be ONLY the fixed code block
+- Start your response with: ```python
+- End your response with: ```
+- NO text before ```python, NO text after the closing ```
+- NO explanations outside the code block
+
+Fix the exact error given. Preserve original logic. Use 4-space indentation consistently.
 """
 
 
@@ -88,8 +83,58 @@ class CodingAgent(BaseAgent):
         attempt = event.payload.get("attempt", 1)
         await self.fix_code(script_path, error_context, strategy_id, attempt)
 
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_syntax(code: str) -> str | None:
+        """Return None if syntax OK, or a descriptive error string."""
+        try:
+            compile(code, "<generated>", "exec")
+            return None
+        except (SyntaxError, IndentationError) as e:
+            return f"{type(e).__name__} at line {e.lineno}: {e.msg} — near {e.text!r}"
+
+    @staticmethod
+    def _extract_code(text: str) -> str:
+        """Extract Python code from AI response.
+
+        Tries all ```python blocks, picks the one that passes syntax check.
+        Falls back to any ``` block, then raw text.
+        """
+        text = text.strip()
+
+        # --- Collect ALL ```python ... ``` blocks ---
+        python_blocks = re.findall(r'```python\s*\n(.*?)```', text, re.DOTALL)
+        if python_blocks:
+            # Prefer the block that passes syntax validation
+            for block in python_blocks:
+                stripped = block.strip()
+                if stripped and CodingAgent._validate_syntax(stripped) is None:
+                    return stripped
+            # None passed — return the longest for the fixer to work with
+            return max(python_blocks, key=len).strip()
+
+        # --- Any generic ``` block ---
+        generic_blocks = re.findall(r'```\s*\n(.*?)```', text, re.DOTALL)
+        if generic_blocks:
+            for block in generic_blocks:
+                stripped = block.strip()
+                if stripped and CodingAgent._validate_syntax(stripped) is None:
+                    return stripped
+            return max(generic_blocks, key=len).strip()
+
+        # --- Raw fallback: strip prose before first code line ---
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if s.startswith(("import ", "from ", "def ", "class ", "#!")):
+                return "\n".join(lines[i:])
+
+        return text
+
+    # ── Code generation ──────────────────────────────────────────────────────
+
     async def generate_strategy_code(self, strategy: dict) -> str:
-        """Generate a Python backtesting script for a strategy."""
         self.status = AgentStatus.WORKING
         strategy_name = strategy.get("strategy_name", "Unknown")
         strategy_id = strategy.get("strategy_id", str(uuid.uuid4()))
@@ -101,58 +146,61 @@ class CodingAgent(BaseAgent):
             level="info"
         )
 
-        prompt = f"""
-Generate a complete Python backtesting script for this trading strategy:
+        base_prompt = f"""
+Write a complete Python backtesting script for this strategy.
 
 STRATEGY: {strategy.get('strategy_name')}
-OVERVIEW: {strategy.get('overview')}
-
-Entry Conditions: {strategy.get('entry_conditions')}
-Exit Conditions: {strategy.get('exit_conditions')}
-Indicators: {strategy.get('indicators')}
-Timeframes: {strategy.get('timeframes')}
-Symbols: {strategy.get('symbols', ['BTCUSDT'])}
-Stop Loss: {strategy.get('stop_loss_pct', 0.02) * 100}%
-Take Profit: {strategy.get('take_profit_pct', 0.04) * 100}%
-
-PACKAGE FREEDOM — You can import ANY Python library you want.
-The system will auto-install missing packages before running.
-Examples you can use freely:
-- pandas_ta (for 130+ indicators)
-- statsmodels (for statistical models)
-- scikit-learn (for ML signals)
-- lightgbm / xgboost (for ML-based entry signals)
-- scipy (for signal processing / curve fitting)
-- pykalman (for Kalman filter)
-- hmmlearn (for Hidden Markov Models / regime detection)
-- ruptures (for changepoint detection)
-- optuna (for parameter optimization)
-- OR any other library that fits the strategy
+OVERVIEW: {strategy.get('overview', 'N/A')}
+Entry: {strategy.get('entry_long', strategy.get('entry_conditions', 'N/A'))}
+Exit: {strategy.get('exit_long', strategy.get('exit_conditions', 'N/A'))}
+Indicators: {strategy.get('indicators', [])}
+Stop Loss: {float(strategy.get('stop_loss_pct', 0.02)) * 100:.1f}%
+Take Profit: {float(strategy.get('take_profit_pct', 0.04)) * 100:.1f}%
+Strategy ID: {strategy_id}
 
 REQUIREMENTS:
-1. Generate SYNTHETIC test data (500+ bars of OHLCV) — DO NOT use external APIs
-2. Implement the full strategy logic using whatever libraries make sense
-3. Produce signals: 1=long, -1=short, 0=flat
-4. Calculate metrics: total_trades, winrate, pnl_pct, max_drawdown, profit_factor, sharpe_ratio
-5. Print results as JSON: {{"strategy_id": "...", "metrics": {{...}}, "signals_generated": N}}
-6. Handle all NaN values
-7. Be creative — if ML would make this strategy better, use it
+- Synthetic OHLCV data (500 bars)
+- Full signal logic (1=long, -1=short, 0=flat)
+- Metrics: total_trades, winrate, pnl_pct, max_drawdown, profit_factor, sharpe_ratio
+- Print JSON result at the end
+- 4-space indentation, handle NaN with fillna/dropna
 
-Strategy ID to embed: {strategy_id}
+OUTPUT: respond with ONLY ```python ... ``` — nothing else.
 """
+
         try:
-            code = await self.think(prompt, system_prompt=SYSTEM_PROMPT)
-            code = self._extract_code(code)
+            code = ""
+            syntax_err = "not generated yet"
 
-            if not code:
-                raise ValueError("AI returned empty code")
+            for attempt in range(3):
+                if attempt == 0:
+                    prompt = base_prompt
+                else:
+                    prompt = (
+                        base_prompt +
+                        f"\n\n[RETRY {attempt}/2] Previous code had error: {syntax_err}\n"
+                        "Fix ALL indentation issues. Return ONLY ```python ... ```."
+                    )
 
-            # Pre-scan and install any packages the AI decided to use
+                raw = await self.think(prompt, system_prompt=SYSTEM_PROMPT)
+                code = self._extract_code(raw)
+
+                if not code:
+                    syntax_err = "AI returned empty code"
+                    continue
+
+                syntax_err = self._validate_syntax(code)
+                if syntax_err is None:
+                    self.logger.info(f"[Coding] Valid code on attempt {attempt + 1}")
+                    break
+                self.logger.warning(f"[Coding] Syntax error attempt {attempt + 1}: {syntax_err}")
+
+            if syntax_err is not None:
+                raise ValueError(f"Code still has errors after 3 attempts: {syntax_err}")
+
+            # Pre-install packages
             pre_installed = await self.pkg_manager.install_from_imports(code)
             if pre_installed:
-                self.logger.info(
-                    f"[Coding] Pre-installed packages: {pre_installed}"
-                )
                 await self.notify_telegram(
                     f"📦 **Auto-installed** `{len(pre_installed)}` packages\n"
                     f"`{', '.join(pre_installed[:5])}`",
@@ -163,7 +211,6 @@ Strategy ID to embed: {strategy_id}
             filename = f"strategy_{strategy_id[:8]}_{int(time.time())}.py"
             script_path = self.file_manager.save_strategy_script(filename, code)
 
-            # Save to DB
             store = get_store()
             await store.save_strategy({
                 "strategy_id": strategy_id,
@@ -180,8 +227,8 @@ Strategy ID to embed: {strategy_id}
 
             self.tasks_completed += 1
             self.status = AgentStatus.IDLE
-
             self.logger.info(f"[Coding] Script saved: {script_path}")
+
             await self.notify_telegram(
                 f"✅ **Code Generated**\n"
                 f"📄 File: `{filename}`\n"
@@ -189,7 +236,6 @@ Strategy ID to embed: {strategy_id}
                 level="success"
             )
 
-            # Trigger execution/backtest
             await self.emit(
                 EventType.CODE_GENERATED,
                 payload={
@@ -199,13 +245,14 @@ Strategy ID to embed: {strategy_id}
                     "strategy": strategy,
                 }
             )
-
             return script_path
 
         except Exception as e:
             await self.handle_error(e, f"generate_code for {strategy_name}")
             self.status = AgentStatus.IDLE
             return ""
+
+    # ── Code fixing ──────────────────────────────────────────────────────────
 
     async def fix_code(
         self,
@@ -214,7 +261,6 @@ Strategy ID to embed: {strategy_id}
         strategy_id: str,
         attempt: int = 1,
     ) -> str:
-        """Fix a broken script based on error context."""
         if attempt > 3:
             self.logger.warning(f"[Coding] Max fix attempts reached for {script_path}")
             await self.notify_telegram(
@@ -234,33 +280,53 @@ Strategy ID to embed: {strategy_id}
         try:
             original_code = self.file_manager.read_file(script_path)
 
-            prompt = f"""
-Fix this Python script. It has the following error:
+            prompt = f"""Fix this Python script.
 
+ERROR:
 {error_context}
 
-ORIGINAL CODE:
+BUGGY CODE:
 ```python
 {original_code}
 ```
 
-Return ONLY the complete fixed Python code. No explanations, no markdown, just pure Python code.
-Start with the import statements.
+- Fix the exact error shown above
+- Use 4-space indentation throughout
+- Preserve original strategy logic
+- OUTPUT: respond with ONLY ```python ... ``` — nothing else.
 """
-            fixed_code = await self.think(prompt, system_prompt=FIX_SYSTEM_PROMPT)
-            fixed_code = self._extract_code(fixed_code)
+            fixed_code = ""
+            syntax_err = "not fixed yet"
+
+            for fix_attempt in range(2):
+                if fix_attempt > 0:
+                    prompt += (
+                        f"\n\n[RETRY] Fixed code still has error: {syntax_err}\n"
+                        "Return ONLY ```python ... ``` with all syntax fixed."
+                    )
+
+                raw = await self.think(prompt, system_prompt=FIX_SYSTEM_PROMPT)
+                fixed_code = self._extract_code(raw)
+
+                if not fixed_code:
+                    syntax_err = "empty code returned"
+                    continue
+
+                syntax_err = self._validate_syntax(fixed_code)
+                if syntax_err is None:
+                    break
+                self.logger.warning(f"[Coding] Fix still broken: {syntax_err}")
 
             if not fixed_code:
                 raise ValueError("Fix returned empty code")
 
-            # Save fixed version
+            # Save fixed version (even if syntax check failed — let runner report real error)
             fixed_path = script_path.replace(".py", f"_fix{attempt}.py")
             self.file_manager.save_file(fixed_path, fixed_code)
 
             self.tasks_completed += 1
             self.status = AgentStatus.IDLE
 
-            # Retry backtest with fixed code
             await self.emit(
                 EventType.CODE_FIXED,
                 payload={
@@ -270,32 +336,9 @@ Start with the import statements.
                     "original_path": script_path,
                 }
             )
-
             return fixed_path
 
         except Exception as e:
             await self.handle_error(e, f"fix_code attempt {attempt}")
             self.status = AgentStatus.IDLE
             return ""
-
-    @staticmethod
-    def _extract_code(text: str) -> str:
-        """Extract Python code from AI response."""
-        text = text.strip()
-        # Try ```python ... ``` block
-        match = re.search(r'```python\n(.*?)```', text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        # Try ``` ... ``` block
-        match = re.search(r'```\n(.*?)```', text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        # If no markdown block, assume raw code
-        if text.startswith("import") or text.startswith("#"):
-            return text
-        # Last resort: find first import statement
-        lines = text.split("\n")
-        for i, line in enumerate(lines):
-            if line.strip().startswith("import") or line.strip().startswith("from"):
-                return "\n".join(lines[i:])
-        return text
