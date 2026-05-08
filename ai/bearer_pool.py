@@ -17,49 +17,55 @@ logger = logging.getLogger(__name__)
 def _extract_json(raw: str) -> dict:
     """
     Robustly extract a JSON object from Qwen response.
-    Handles: markdown fences, extra text before/after, multiple objects,
-    'Extra data' error (takes the FIRST complete JSON object only).
+    Handles:
+    - Markdown fences (```json ... ```)
+    - Extra text before/after JSON
+    - Multiple JSON objects (takes first complete one)
+    - Python dict syntax with single quotes  ← NEW
+    - Trailing commas                        ← NEW
+    - None/True/False Python literals        ← NEW
     """
     import json
     import re
+    import ast
 
     raw = raw.strip()
 
     # Strip markdown code fences
     if raw.startswith("```"):
         lines = raw.split("\n")
-        # Remove first line (```json or ```) and last line (```)
         inner = lines[1:]
         if inner and inner[-1].strip() == "```":
             inner = inner[:-1]
         raw = "\n".join(inner).strip()
 
-    # Try direct parse first (happy path)
+    # ── Attempt 1: direct JSON parse (happy path) ─────────────────────────
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
-    # Find the FIRST complete JSON object by tracking brace depth
-    # This handles "Extra data" (multiple objects) and text after JSON
+    # ── Find the outermost { ... } block ─────────────────────────────────
     start = raw.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in response: {raw[:200]}")
 
+    # Track brace depth to find the matching closing brace
     depth = 0
-    in_string = False
-    escape = False
+    in_str = False
+    esc = False
+    candidate = raw  # fallback
     for i, ch in enumerate(raw[start:], start):
-        if escape:
-            escape = False
+        if esc:
+            esc = False
             continue
-        if ch == "\\" and in_string:
-            escape = True
+        if ch == "\\" and in_str:
+            esc = True
             continue
-        if ch == '"' and not escape:
-            in_string = not in_string
+        if ch == '"' and not esc:
+            in_str = not in_str
             continue
-        if in_string:
+        if in_str:
             continue
         if ch == "{":
             depth += 1
@@ -67,15 +73,44 @@ def _extract_json(raw: str) -> dict:
             depth -= 1
             if depth == 0:
                 candidate = raw[start:i + 1]
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError as e:
-                    raise ValueError(
-                        f"Found JSON-like block but could not parse: {e}\n"
-                        f"Block: {candidate[:300]}"
-                    )
+                break
 
-    raise ValueError(f"Unbalanced JSON braces in response: {raw[:300]}")
+    # ── Attempt 2: JSON parse the extracted block ─────────────────────────
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    # ── Attempt 3: fix Python dict → JSON ────────────────────────────────
+    # Qwen sometimes returns Python dict syntax: {'key': 'value', 'n': None}
+    # ast.literal_eval handles single quotes, None, True, False
+    try:
+        py_obj = ast.literal_eval(candidate)
+        if isinstance(py_obj, dict):
+            # Round-trip through json to normalize types
+            return json.loads(json.dumps(py_obj))
+    except Exception:
+        pass
+
+    # ── Attempt 4: aggressive cleanup then re-parse ───────────────────────
+    try:
+        fixed = candidate
+        # single quotes → double quotes (careful not to break already-double-quoted)
+        fixed = re.sub(r"(?<![\\])'", '"', fixed)
+        # Python None/True/False → JSON null/true/false
+        fixed = re.sub(r'\bNone\b', 'null', fixed)
+        fixed = re.sub(r'\bTrue\b', 'true', fixed)
+        fixed = re.sub(r'\bFalse\b', 'false', fixed)
+        # trailing commas before } or ]
+        fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+        return json.loads(fixed)
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Could not parse JSON from response after all attempts.\n"
+        f"Candidate block: {candidate[:400]}"
+    )
 
 
 class BearerPool:
