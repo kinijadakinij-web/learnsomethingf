@@ -143,24 +143,26 @@ Provide a detailed research report with:
 Past topics already researched (avoid overlap):
 {', '.join(past_topics[-10:])}
 
-Return as JSON with keys:
+Return a JSON object with EXACTLY these keys filled with real values (no placeholders):
 {{
-  "strategy_name": "...",
-  "topic": "...",
-  "overview": "...",
-  "entry_conditions": [...],
-  "exit_conditions": [...],
-  "indicators": [{{"name": "...", "params": {{...}}}}],
-  "timeframes": [...],
-  "symbols": [...],
+  "strategy_name": "EMA Momentum Volume Filter",
+  "topic": "momentum strategies on BTC/USDT using volume confirmation",
+  "overview": "Uses EMA crossover confirmed by volume spike to enter momentum trades",
+  "entry_conditions": ["EMA20 crosses above EMA50", "Volume > 1.5x 20-period average"],
+  "exit_conditions": ["EMA20 crosses below EMA50", "RSI above 75"],
+  "indicators": [{{"name": "EMA", "params": {{"period": 20}}}}, {{"name": "EMA", "params": {{"period": 50}}}}],
+  "timeframes": ["1h", "4h"],
+  "symbols": ["BTCUSDT", "ETHUSDT"],
   "stop_loss_pct": 0.02,
   "take_profit_pct": 0.04,
   "expected_winrate": 0.55,
-  "holding_period": "...",
-  "weaknesses": [...],
-  "unique_edge": "...",
-  "complexity": "simple|medium|complex"
+  "holding_period": "4-24 hours",
+  "weaknesses": ["Choppy markets cause whipsaws", "Lagging indicator in fast moves"],
+  "unique_edge": "Volume confirmation reduces false breakouts by 30 percent",
+  "complexity": "simple"
 }}
+
+IMPORTANT: Replace ALL example values above with real values specific to the strategy you are describing. Do not copy the example verbatim.
 """
         try:
             research = await self.think_json(prompt, system_prompt=SYSTEM_PROMPT)
