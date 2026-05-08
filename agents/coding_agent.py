@@ -95,33 +95,114 @@ class CodingAgent(BaseAgent):
             return f"{type(e).__name__} at line {e.lineno}: {e.msg} — near {e.text!r}"
 
     @staticmethod
+    def _sanitize_code(code: str) -> str:
+        """Fix common issues in AI-generated code.
+
+        Specifically targets unterminated string literals caused by apostrophes
+        inside single-quoted strings — a frequent Qwen code-gen artifact.
+        E.g.: "shouldn't", "don't", "can't" inside '...' strings.
+        """
+        fixed_lines = []
+        for line in code.splitlines():
+            fixed_lines.append(CodingAgent._fix_line_apostrophes(line))
+        return "\n".join(fixed_lines)
+
+    @staticmethod
+    def _fix_line_apostrophes(line: str) -> str:
+        """Fix a single line: replace single-quoted strings that contain apostrophes
+        (contractions like shouldn't, don't, can't) with double-quoted equivalents
+        so Python doesn't terminate the string early.
+
+        Detection: a single-quote followed immediately by a letter is treated as
+        an apostrophe-in-word, not a closing delimiter.
+        Comments (#) are left untouched — apostrophes in comments are valid.
+        """
+        result = []
+        i = 0
+        while i < len(line):
+            # Skip # comments — apostrophes in comments are always fine
+            if line[i] == '"':
+                result.append(line[i])
+                i += 1
+                while i < len(line):
+                    if line[i] == '\\':
+                        result.append(line[i:i+2])
+                        i += 2
+                    elif line[i] == '"':
+                        result.append(line[i])
+                        i += 1
+                        break
+                    else:
+                        result.append(line[i])
+                        i += 1
+                continue
+            if line[i] == '#':
+                result.append(line[i:])
+                break
+            # Handle single-quoted strings
+            if line[i] == "'":
+                j = i + 1
+                content = []
+                has_apostrophe = False
+                while j < len(line):
+                    if line[j] == '\\':
+                        content.append(line[j:j+2])
+                        j += 2
+                    elif line[j] == "'":
+                        # Apostrophe mid-word? (e.g. shouldn't → ' followed by 't')
+                        if j + 1 < len(line) and line[j + 1].isalpha():
+                            content.append("'")
+                            has_apostrophe = True
+                            j += 1
+                        else:
+                            j += 1  # real closing quote
+                            break
+                    else:
+                        content.append(line[j])
+                        j += 1
+                inner = "".join(content)
+                if has_apostrophe:
+                    # Re-wrap with double quotes so the apostrophe is safe
+                    inner_escaped = inner.replace('"', '\\"')
+                    result.append(f'"{inner_escaped}"')
+                else:
+                    result.append(f"'{inner}'")
+                i = j
+                continue
+            result.append(line[i])
+            i += 1
+        return "".join(result)
+
+    @staticmethod
     def _extract_code(text: str) -> str:
         """Extract Python code from AI response.
 
         Tries all ```python blocks, picks the one that passes syntax check.
         Falls back to any ``` block, then raw text.
+        Applies _sanitize_code to fix apostrophe-related syntax errors before
+        returning any block.
         """
         text = text.strip()
 
         # --- Collect ALL ```python ... ``` blocks ---
         python_blocks = re.findall(r'```python\s*\n(.*?)```', text, re.DOTALL)
         if python_blocks:
-            # Prefer the block that passes syntax validation
+            # Prefer the block that passes syntax validation (with sanitize)
             for block in python_blocks:
-                stripped = block.strip()
+                stripped = CodingAgent._sanitize_code(block.strip())
                 if stripped and CodingAgent._validate_syntax(stripped) is None:
                     return stripped
-            # None passed — return the longest for the fixer to work with
-            return max(python_blocks, key=len).strip()
+            # None passed — return sanitized longest for the fixer to work with
+            return CodingAgent._sanitize_code(max(python_blocks, key=len).strip())
 
         # --- Any generic ``` block ---
         generic_blocks = re.findall(r'```\s*\n(.*?)```', text, re.DOTALL)
         if generic_blocks:
             for block in generic_blocks:
-                stripped = block.strip()
+                stripped = CodingAgent._sanitize_code(block.strip())
                 if stripped and CodingAgent._validate_syntax(stripped) is None:
                     return stripped
-            return max(generic_blocks, key=len).strip()
+            return CodingAgent._sanitize_code(max(generic_blocks, key=len).strip())
 
         # --- Raw fallback: strip prose before first code line ---
         lines = text.split("\n")
