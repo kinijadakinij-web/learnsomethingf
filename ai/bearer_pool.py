@@ -14,6 +14,70 @@ from ai.qwen_client import QwenClient
 logger = logging.getLogger(__name__)
 
 
+def _extract_json(raw: str) -> dict:
+    """
+    Robustly extract a JSON object from Qwen response.
+    Handles: markdown fences, extra text before/after, multiple objects,
+    'Extra data' error (takes the FIRST complete JSON object only).
+    """
+    import json
+    import re
+
+    raw = raw.strip()
+
+    # Strip markdown code fences
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        # Remove first line (```json or ```) and last line (```)
+        inner = lines[1:]
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        raw = "\n".join(inner).strip()
+
+    # Try direct parse first (happy path)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the FIRST complete JSON object by tracking brace depth
+    # This handles "Extra data" (multiple objects) and text after JSON
+    start = raw.find("{")
+    if start == -1:
+        raise ValueError(f"No JSON object found in response: {raw[:200]}")
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(raw[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = raw[start:i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Found JSON-like block but could not parse: {e}\n"
+                        f"Block: {candidate[:300]}"
+                    )
+
+    raise ValueError(f"Unbalanced JSON braces in response: {raw[:300]}")
+
+
 class BearerPool:
     """
     Manages a pool of Qwen bearer tokens.
@@ -134,27 +198,13 @@ class BearerPool:
         system_prompt: Optional[str] = None,
         history: Optional[list] = None,
     ) -> dict:
-        """Ask Qwen and return parsed JSON."""
+        """Ask Qwen and return parsed JSON — robust against extra text/multiple objects."""
         json_system = (system_prompt or "") + (
             "\n\nIMPORTANT: Respond ONLY with valid JSON. "
             "No markdown, no explanation, no backticks. Pure JSON only."
         )
         raw = await self.ask(prompt, system_prompt=json_system, history=history)
-
-        raw = raw.strip()
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-        import json
-        import re
-        try:
-            return json.loads(raw)
-        except Exception:
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            raise
+        return _extract_json(raw)
 
     @property
     def status(self) -> dict:
