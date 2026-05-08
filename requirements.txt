@@ -15,7 +15,7 @@ python-telegram-bot==20.7
 # Data / Quant
 pandas==2.1.4
 numpy==1.26.2
-pandas-ta==0.3.14b0
+pandas-ta==0.4.67b0
 
 # Logging / Display
 colorlog==6.8.0
