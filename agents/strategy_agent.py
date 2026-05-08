@@ -77,7 +77,7 @@ Define the EXACT strategy specification:
 8. Cooldown period between trades
 9. Which symbol and timeframe to test first
 
-Return JSON:
+Return a JSON object with EXACTLY these keys filled with real values (no placeholders):
 {{
   "strategy_id": "{strategy_id}",
   "strategy_name": "{strategy_name}",
@@ -89,21 +89,23 @@ Return JSON:
     {{"name": "EMA", "period": 20, "source": "close"}},
     {{"name": "RSI", "period": 14}}
   ],
-  "entry_long": "...",
-  "entry_short": "...",
-  "exit_long": "...",
-  "exit_short": "...",
+  "entry_long": "EMA20 crosses above EMA50 AND RSI > 50 AND volume > 20-bar average",
+  "entry_short": "EMA20 crosses below EMA50 AND RSI < 50 AND volume > 20-bar average",
+  "exit_long": "EMA20 crosses below EMA50 OR RSI > 75 OR stop loss hit",
+  "exit_short": "EMA20 crosses above EMA50 OR RSI < 25 OR stop loss hit",
   "stop_loss_pct": 0.02,
   "take_profit_pct": 0.04,
   "position_size_pct": 0.95,
   "max_positions": 1,
   "leverage": 10,
   "cooldown_bars": 3,
-  "description": "...",
-  "complexity": "simple|medium|complex",
-  "expected_frequency": "trades per day",
-  "risk_level": "low|medium|high"
+  "description": "EMA crossover momentum strategy with RSI and volume confirmation on BTC 1h",
+  "complexity": "simple",
+  "expected_frequency": "2-4 trades per day",
+  "risk_level": "medium"
 }}
+
+IMPORTANT: Replace ALL example values above with the actual strategy logic from the research. Do not copy the example verbatim.
 """
         try:
             strategy = await self.think_json(prompt, system_prompt=SYSTEM_PROMPT)
