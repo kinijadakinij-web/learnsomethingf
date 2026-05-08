@@ -248,12 +248,39 @@ class QwenClient:
         prompt: str,
         system_prompt: Optional[str] = None,
         history: Optional[list] = None,
+        json_retries: int = 3,
     ) -> dict:
-        """Ask Qwen and return parsed JSON — robust extraction."""
+        """Ask Qwen and return parsed JSON.
+
+        Retries the AI call with corrective feedback on parse failure so that
+        template echo-backs and malformed outputs are self-healed.
+        """
         from ai.bearer_pool import _extract_json
         json_system = (system_prompt or "") + (
-            "\n\nIMPORTANT: Respond ONLY with valid JSON. "
-            "No markdown, no explanation, no backticks. Pure JSON only."
+            "\n\nCRITICAL: Your response must be ONLY a valid JSON object. "
+            "Do NOT include any explanation, markdown fences, backticks, or "
+            "placeholder values like \'...\' or \'{...}\'. "
+            "Fill in every field with real values. Pure JSON only."
         )
-        raw = await self.ask(prompt, system_prompt=json_system, history=history)
-        return _extract_json(raw)
+        last_err: Exception = RuntimeError("No attempts made")
+        for attempt in range(json_retries):
+            if attempt == 0:
+                current_prompt = prompt
+            else:
+                current_prompt = (
+                    f"{prompt}\n\n"
+                    f"[RETRY {attempt}/{json_retries-1}] Your previous response could not be "
+                    f"parsed as JSON. Error: {last_err}\n"
+                    "Please respond with ONLY a valid JSON object, no placeholders."
+                )
+            raw = await self.ask(current_prompt, system_prompt=json_system, history=history)
+            try:
+                return _extract_json(raw)
+            except ValueError as e:
+                last_err = e
+                logger.warning(
+                    f"[QwenClient.ask_json] Parse failed (attempt {attempt+1}/{json_retries}): {e}"
+                )
+        raise ValueError(
+            f"ask_json failed after {json_retries} attempts. Last error: {last_err}"
+        )
