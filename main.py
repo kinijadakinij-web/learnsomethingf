@@ -4,6 +4,7 @@ Run: python main.py
 """
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -12,7 +13,18 @@ from rich.logging import RichHandler
 
 import config
 
-# ── Logging setup ──────────────────────────────────────────────────────────────
+# ── Buat semua direktori DULU sebelum apapun ──────────────────────────────────
+# FileHandler akan crash kalau folder belum ada
+for _dir in [
+    config.GENERATED_DIR,
+    config.STRATEGIES_DIR,
+    config.REPORTS_DIR,
+    config.BACKTESTS_DIR,
+    config.LOGS_DIR,
+]:
+    os.makedirs(_dir, exist_ok=True)
+
+# ── Logging setup (setelah folder dibuat) ─────────────────────────────────────
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(message)s",
@@ -30,7 +42,6 @@ async def main():
 
     orchestrator = Orchestrator()
 
-    # Graceful shutdown on CTRL+C or SIGTERM
     loop = asyncio.get_event_loop()
 
     def _shutdown_handler():
@@ -41,7 +52,7 @@ async def main():
         try:
             loop.add_signal_handler(sig, _shutdown_handler)
         except NotImplementedError:
-            pass  # Windows doesn't support add_signal_handler
+            pass  # Windows
 
     try:
         await orchestrator.initialize()
@@ -55,15 +66,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Ensure generated dirs exist before anything
-    import os
-    for d in [
-        config.GENERATED_DIR,
-        config.STRATEGIES_DIR,
-        config.REPORTS_DIR,
-        config.BACKTESTS_DIR,
-        config.LOGS_DIR,
-    ]:
-        os.makedirs(d, exist_ok=True)
-
     asyncio.run(main())
