@@ -44,7 +44,13 @@ class StrategyAgent(BaseAgent):
 
     async def create_strategy_from_research(self, research: dict) -> dict:
         self.status = AgentStatus.WORKING
-        strategy_name = research.get("strategy_name", "Unknown")
+        strategy_name = (
+            research.get("strategy_name")
+            or research.get("name")
+            or research.get("title")
+            or research.get("topic", "")[:50]
+            or "Unknown Strategy"
+        )
         strategy_id = str(uuid.uuid4())
 
         self.logger.info(f"[Strategy] Building strategy: {strategy_name}")
